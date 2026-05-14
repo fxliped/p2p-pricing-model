@@ -296,3 +296,24 @@ search.fit(X_train, y_train)
 print("Best params: ", search.best_params_)
 print("Best CV AUC: ", search.best_score_)
 # Best CV AUC: 0.6026
+
+
+all_cats = sorted(df["category"].unique())
+cat_cols = ["category", "condition"]
+num_cols = ["brand_tier", "quality_score", "est_value", "list_price", "log_price_ratio"]
+interact_cols = [f"lpr_{c}" for c in all_cats]
+all_num = num_cols + interact_cols
+
+# cross-validated Random Forest model
+clf = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier', RandomForestClassifier(
+        n_estimators = 200, max_depth = 5, min_samples_leaf = 5,
+        class_weight = 'balanced', random_state = 42
+    ))
+])
+
+clf.fit(X_train, y_train)
+y_prob = clf.predict_proba(X_test)[:, 1] 
+y_pred = clf.predict(X_test)
+print(f"  \nAUC-ROC  : {roc_auc_score(y_test, y_prob):.4f}")
