@@ -7,7 +7,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, log_loss, 
@@ -31,15 +31,24 @@ df['sold_14d'].value_counts(normalize = True)
 df['sold_14d'].value_counts().plot(kind = 'bar')
 plt.show()
 
+# Need to check distribution for days_to_sell (3168 nulls)
+    # Won't matter because we are dropping it, per project specifications
+
+
 
 # -- Data Cleaning & Feature Engineering --
 
-df['log_price_ratio'] = np.log(df['list_price'] / df['est_value'])
-df.drop(['days_to_sell', 'gmv_14d', 'platform_revenue_14d', 'seller_payout_14d'], axis = 1, inplace = True)
+
+
+# First Visualize the Variables
+
+# Keep only features available at listing time
+    # But keep response variable, sold_14d
+
+df.drop(columns=['days_to_sell', 'gmv_14d', 'platform_revenue_14d', 'seller_payout_14d'], inplace=True)
 
 num_cols = df.select_dtypes(include = 'number').columns.drop('sold_14d')
 cat_cols = df.select_dtypes(include = 'object').columns
-
 
 for col in num_cols:
     sns.histplot(data = df, x = col, hue = 'sold_14d', kde = True, bins = 30)
@@ -51,6 +60,39 @@ for col in cat_cols:
     sell_rate.plot(kind = 'barh')
     plt.title(f'sell rate by {col}'.upper())
     plt.show()
+
+# seller_rating skewed heavily to 5, otherwise relatively gaussian
+# est_value & list_price are skewed right -> needs log transform
+    # log transformations still look bad
+
+df['log_price_ratio'] = np.log(df['list_price'] / df['est_value'])
+
+pt = PowerTransformer(method = 'box-cox', standardize = True)
+pt.fit_transform(df[['list_price', 'est_value']])
+print(f"Optimal Lambda: {pt.lambdas_}")
+
+# Manually apply box-cox formula to skewed variables
+
+#df['transformed_list_price'] = (df['list_price']**pt.lambdas_[0]- 1) / pt.lambdas_[0]
+#df['transformed_est_value'] = (df['est_value']**pt.lambdas_[1]- 1) / pt.lambdas_[1]
+#df.drop(columns = ['list_price', 'est_value'], axis = 1, inplace = True)
+
+num_cols = df.select_dtypes(include = 'number').columns.drop('sold_14d')
+cat_cols = df.select_dtypes(include = 'object').columns
+
+# Visualize variables after transformations
+for col in num_cols:
+    sns.histplot(data = df, x = col, hue = 'sold_14d', kde = True, bins = 30)
+    plt.title(f'{col} by sold_14d'.upper())
+    plt.show()
+
+for col in cat_cols:
+    sell_rate = df.groupby(col)['sold_14d'].mean().sort_values()
+    sell_rate.plot(kind = 'barh')
+    plt.title(f'sell rate by {col}'.upper())
+    plt.show()
+
+
 
 
 # --- Split Data ---
@@ -87,9 +129,9 @@ preprocessor = ColumnTransformer([
 # RandomForest importance
 
 X_train = train_df.drop(['sold_14d', 'created_at'], axis = 1)
-X_train_encoded = pd.get_dummies(X_train, columns = cat_cols)
+X_train_encoded = pd.get_dummies(X_train, columns = list(cat_cols))
 X_test = test_df.drop(['sold_14d', 'created_at'], axis = 1)
-X_test_encoded = pd.get_dummies(X_test.copy(), columns = cat_cols)
+X_test_encoded = pd.get_dummies(X_test.copy(), columns = list(cat_cols))
 
 y_train = train_df['sold_14d']
 y_test = test_df['sold_14d']
@@ -111,6 +153,10 @@ plt.title('Feature Importances')
 plt.tight_layout()
 plt.show()
 
+# Most important appear to be: quality_score, seller_id, desc_len,
+# listing_id, propensity, seller_rating, take_rate, transformed_est_value, 
+# transformed_list_price, photo_count, brand_tier, multiplier
+
 
 # VIF (detect multicollinearity)
 
@@ -124,7 +170,26 @@ print(vif.sort_values('VIF', ascending = False))
 
 # NEXT:
     # ACTUALLY SELECT THE BEST FEATURES
+# Due to high VIFs for list_price and est_value, lets drop est_value
+train_df_clean = train_df.drop(columns=['take_rate', 'multiplier', 'listing_id'])
 
+# Recheck
+    # Have lower VIFs w/o the transformed variables, but we perform worse w/o them
+X_vif = (train_df_clean
+         .replace([np.inf, -np.inf], np.nan)
+         .dropna()
+         .select_dtypes(include='number')
+         .astype(float))
+vif = pd.DataFrame({
+    'feature': X_vif.columns,
+    'VIF': [variance_inflation_factor(X_vif.values, i) 
+            for i in range(X_vif.shape[1])] 
+})
+print(vif.sort_values('VIF', ascending = False))
+
+
+# told we must keep: `category`, `brand_tier`, `condition`
+# - `quality_score`, `est_value`, `list_price`
 
 
 # --- Model Selection ---
@@ -158,6 +223,9 @@ for name, model in [('Logistic Regression', lr_model),
     print(f"  AUC-ROC  : {roc_auc_score(y_test, y_prob):.4f}") # why do the .4f? (4 decimal spots appears to be convention for metrics)
     print(f"  Log Loss : {log_loss(y_test, y_prob):.4f}")
     print(classification_report(y_test, y_pred))
+
+# Logistic Regression AUC-ROC: 0.6010
+# Random Forest AUC-ROC: 0.5748
 
 importances.sort_values(ascending = False).head(10)
 
@@ -208,6 +276,7 @@ p1 = rf_model.predict_proba(seg_p1)[:, 1]
 
 elasticity = ((p1 - p0) / p0) / 0.01
 print(f"\nAverage elasticity (Women_Tops): {elasticity.mean():.4f}")
+# -0.4755 elasticity
 
 # -- Tune Hyperparameters / Cross Validation --
 
@@ -226,3 +295,4 @@ search = RandomizedSearchCV(
 search.fit(X_train, y_train)
 print("Best params: ", search.best_params_)
 print("Best CV AUC: ", search.best_score_)
+# Best CV AUC: 0.6026
